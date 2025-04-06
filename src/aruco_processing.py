@@ -11,23 +11,18 @@ from pathlib import Path
 aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
 
 
-def video_frames_extractor(video_path: Path):
-    vr = decord.VideoReader(str(video_path), ctx=decord.cpu(0))
-    frames = []
-    for i in range(len(vr)):
-        frames.append(vr[i])
-    frames_tensor = torch.stack(frames)
-    frames_tensor = frames_tensor / 255.0
-    frames_tensor = einops.rearrange(frames_tensor, "t h w c -> t c h w")
-    # frames_tensor = NORMALIZER(frames_tensor)
-    return frames_tensor
-
-
 @dataclass
 class DetectionGap:
     start_frame_index: int
     start_corners: np.ndarray  # [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
     end_frame_index: int = None
+
+
+def annotate_frame(frame: np.ndarray, markerId: int, corners: np.ndarray):
+    corners = corners.astype("int")
+    text_position = (corners[0, 0].item(), corners[0, 1].item() - 15)
+    cv2.polylines(frame, [corners], True, (0, 255, 0), 2)
+    cv2.putText(frame, str(markerId), text_position, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
 
 class TrackingAnnotator:
@@ -43,18 +38,18 @@ class TrackingAnnotator:
             detector = aruco.ArucoDetector(aruco_dict, parameters)
 
             # Detect ArUco markers
-            marker_corners, marker_ids, rejectedCandidates = detector.detectMarkers(gray)
+            marker_corners, marker_ids, _ = detector.detectMarkers(gray)
 
             if marker_ids is None:
                 marker_ids = []
             if marker_corners:
-                marker_corners, marker_ids = marker_corners[0], marker_ids[0]
+                marker_corners, marker_ids = np.array(marker_corners).squeeze(1), np.array(marker_ids).squeeze(1)
 
             detections.append((marker_corners, marker_ids))
 
             # annotate the detected markers
             for i, marker_id in enumerate(marker_ids):
-                self._annotate_frame(frame, marker_id, marker_corners[i])
+                annotate_frame(frame, marker_id, marker_corners[i])
         self._annotate_gaps(frames, detections)
 
     def find_detection_gaps(self, frames: typing.List[np.ndarray],
@@ -70,7 +65,7 @@ class TrackingAnnotator:
             # record when detection for an aruco marker comes back online
             marker_corners, marker_ids = detections[frame_index]
             for detection_index in range(len(marker_ids)):
-                marker_id = marker_ids[detection_index]
+                marker_id = marker_ids[detection_index].item()
                 if marker_id not in unterminated_gaps:
                     continue
                 gap = unterminated_gaps[marker_id]
@@ -133,11 +128,13 @@ class TrackingAnnotator:
                     if marker_id == 1:
                         missed += 1
                     continue
-                self._annotate_frame(frames[frame_index], marker_id, corners)
+                annotate_frame(frames[frame_index], marker_id, corners)
 
-    def _interpolated_marker_positions(self, frames: typing.List[np.ndarray],
-                                       detection_gaps: typing.Dict[int, typing.List[DetectionGap]]) -> typing.Dict[
-        int, typing.List[np.ndarray | None]]:
+    def _interpolated_marker_positions(
+        self,
+        frames: typing.List[np.ndarray],
+        detection_gaps: typing.Dict[int, typing.List[DetectionGap]]
+    ) -> typing.Dict[int, typing.List[np.ndarray | None]]:
 
         gray = [cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) for frame in frames]
         interpolated_corners = {marker_id: [None] * len(frames) for marker_id in detection_gaps}
@@ -153,20 +150,14 @@ class TrackingAnnotator:
                     for corner_index, corner in enumerate(corners):
                         y, x = int(corner[0]), int(corner[1])
                         tolerance = 30
-                        if not (-tolerance <= y < frame.shape[1] + tolerance and -tolerance <= x < frame.shape[
-                            0] + tolerance):
+                        if not (-tolerance <= y < frame.shape[1] + tolerance
+                                and -tolerance <= x < frame.shape[0] + tolerance):
                             corner_out_of_bounds = True
                             break
                     if corner_out_of_bounds:
                         continue
                     interpolated_corners[marker_id][frame_index] = corners
         return interpolated_corners
-
-    def _annotate_frame(self, frame: np.ndarray, markerId: int, corners: np.ndarray):
-        corners = corners.astype("int")
-        cv2.polylines(frame, [corners], True, (0, 255, 0), 2)
-        cv2.putText(frame, str(markerId), (corners[0, 0], corners[0, 1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 255, 0), 2)
 
 
 def label_frames(video_path: Path):
