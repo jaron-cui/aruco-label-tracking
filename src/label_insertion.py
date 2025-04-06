@@ -22,7 +22,7 @@ class TruncatedNormal(torch.distributions.Normal):
 class LabelInsertion:
     def __init__(
         self,
-        aruco_background_reference_hsv: Tuple[int, int, int],
+        aruco_background_reference_hsv: np.ndarray,
         label_hsv: Tuple[int, int, int],
         border_hsv: Tuple[int, int, int],
         global_hsv_std: Tuple[int, int, int],
@@ -35,6 +35,8 @@ class LabelInsertion:
             TruncatedNormal(x, std, 0, hi).sample() for x, std, hi in zip(hsv, global_hsv_std, HSV_MAXIMUMS)
         ] for hsv in (label_hsv, border_hsv)]
 
+        self.aruco_background_reference_hsv = aruco_background_reference_hsv
+
         # pin the label colors as relative to the aruco label background colors so that label colors match the env
         self.label_hsv_shift, self.border_hsv_shift = [np.array([
             target - source for target, source in zip(target_hsv, aruco_background_reference_hsv)
@@ -45,20 +47,24 @@ class LabelInsertion:
         self.border_width = np.random.randint(*border_width_range)
 
     def transform(self, image: np.ndarray, aruco_corners: np.ndarray) -> np.ndarray:
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         label_corners = scale_quadrilateral(aruco_corners, 1.3)
-        label_mask = self._get_label_mask(image, label_corners)
-        aruco_background_hsv = get_aruco_background_color(image, label_mask)
+        label_mask = get_label_mask(image, label_corners)
+        aruco_background_hsv = get_aruco_background_color(hsv, label_mask, self.aruco_background_reference_hsv)
 
         label_hsv_color = aruco_background_hsv + self.label_hsv_shift
         border_hsv_color = aruco_background_hsv + self.border_hsv_shift
 
+        # assemble basic label and border colors
         label_size = np.array(self.label_resolution) - 2 * self.border_width
-        label_hsv = np.stack([np.full(label_size, x) for x in label_hsv_color], axis=0)
-        label_image = np.stack([np.full(self.label_resolution, x) for x in border_hsv_color], axis=0)
-        label_image[self.border_width:-self.border_width, self.border_width:-self.border_width, :] = label_hsv
+        label_hsv = np.stack([np.full(label_size, x) for x in label_hsv_color], axis=2)
+        label_image = np.stack([np.full(self.label_resolution, x) for x in border_hsv_color], axis=2)
+        label_image[self.border_width:-self.border_width, self.border_width:-self.border_width] = label_hsv
 
-        noise = np.stack([dist.sample(self.label_resolution) for dist in self.local_variation], axis=0)
+        # add local noise
+        noise = np.stack([dist.sample(self.label_resolution) for dist in self.local_variation], axis=2)
         label_image += noise
+        label_image = label_image.clip(0, 255).astype(np.uint8)
 
         cv2.cvtColor(label_image, cv2.COLOR_HSV2RGB, dst=label_image)
         cv2.blur(label_image, (3, 3), dst=label_image)
@@ -66,32 +72,23 @@ class LabelInsertion:
         return label_image
 
 
-hue_range = [22, 37]
-saturation_range = [0, 255]
-value_range = [180, 255]
-hue_mean = 30
-saturation_mean = 200
-value_mean = 255
-hue_dist = TruncatedNormal(TruncatedNormal(hue_mean, 7, *hue_range).sample(), 3, *hue_range)
-hue_dist2 = TruncatedNormal(TruncatedNormal(120, 9, 105, 130).sample(), 5, 105, 130)
-saturation_dist = TruncatedNormal(saturation_mean, 200, *saturation_range)
-value_dist = TruncatedNormal((value_mean - value_range[0]) / (value_range[1] - value_range[0]), 0.5, 0, 1)
+def get_label_mask(image: np.ndarray, label_corners: np.ndarray) -> np.ndarray:
+    mask = np.zeros(image.shape[:-1], dtype=np.uint8)
+    print(label_corners, image.shape, mask.shape)
+    return cv2.fillPoly(mask, [label_corners.astype(np.int32)], 255)
 
-channel_shape = 100, 100
-border_width = np.random.randint(8, 12)
-hue = hue_dist.sample(channel_shape)
-hue2 = hue_dist2.sample(channel_shape)
-hue, hue2 = cv2.blur(np.array(hue), (3, 3)), cv2.blur(np.array(hue2), (3, 3))
-hue2[border_width:-border_width, border_width:-border_width] = hue[border_width:-border_width, border_width:-border_width]
-saturation = saturation_dist.sample(channel_shape)
-value_interval = saturation / (saturation_range[1] - saturation_range[0]) * (value_range[1] - value_range[0])
-value = value_range[1] - (1 - value_dist.sample(channel_shape)) * value_interval
 
-background = np.stack([hue2, saturation, value], axis=2).astype(np.uint8)
+def get_aruco_background_color(
+    image: np.ndarray, label_mask: np.ndarray, aruco_background_hsv: np.ndarray
+) -> np.ndarray:
+    label_only = cv2.bitwise_and(image, image, mask=label_mask)
+    hsv_similarity_by_pixel = -np.abs(label_only - aruco_background_hsv).sum(axis=2)
+    most_similar_pixel = np.argmax(hsv_similarity_by_pixel)
+    print(np.unravel_index(most_similar_pixel, image.shape[:-1]))
+    return image[*np.unravel_index(most_similar_pixel, image.shape[:-1])]
 
-lemon_label_image = cv2.cvtColor(background, cv2.COLOR_HSV2RGB)
-lemon_label_image = cv2.blur(lemon_label_image, (4, 4))
-plt.imshow(cv2.resize(lemon_label_image, (50, 50), interpolation=cv2.INTER_AREA))
+
+
 
 
 #
@@ -118,6 +115,58 @@ def seg_intersect(a1,a2, b1,b2) :
     return (num / denom.astype(float)) * db + b1
 
 
-def scale_quadrilateral(points: np.ndarray, scale_factor: float) -> List[Tuple[float]]:
+def scale_quadrilateral(points: np.ndarray, scale_factor: float) -> np.ndarray:
   center = seg_intersect(points[0], points[2], points[1], points[3])
-  return [(point - center) * scale_factor + center for point in points]
+  return (points - center) * scale_factor + center
+
+import decord
+import matplotlib.pyplot as plt
+from pathlib import Path
+import cv2.aruco as aruco
+def video_frames_extractor(video_path: Path):
+  vr = decord.VideoReader(str(video_path), ctx=decord.cpu(0))
+  frames = []
+  for i in range(len(vr)):
+    frame = vr[i].asnumpy()
+    # draw_marker(frame)
+    frames.append(frame)
+  return frames
+
+
+def show(image):
+  plt.imshow(np.flip(cv2.resize(image, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_AREA).transpose(1, 0, 2), axis=0))
+  plt.figure()
+
+frame = video_frames_extractor(Path('../data/RGB_2025-03-05-14_58_10.mp4'))[90]
+# frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+parameters =  aruco.DetectorParameters()
+aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+detector = aruco.ArucoDetector(aruco_dict, parameters)
+
+# Detect ArUco markers
+marker_corners, marker_ids, _ = detector.detectMarkers(gray)
+marker_corners, marker_ids = np.array(marker_corners).squeeze(1), np.array(marker_ids).squeeze(1)
+marker_corners = [scale_quadrilateral(corners, 1.3) for corners in marker_corners]
+# frame = video_frames_extractor(Path('../data/RGB_2025-03-05-14_58_10.mp4'))[90]
+# transform = LemonTransmutation()
+# out = transform.transform(frame, np.array([220, 480]))
+label_color = get_aruco_background_color(cv2.cvtColor(frame, cv2.COLOR_RGB2HSV), get_label_mask(frame, marker_corners[0]), np.array([65, 15, 255]))
+color = np.zeros((10, 10, 3), dtype=np.uint8)
+color[:, :] = label_color
+print(label_color)
+cv2.cvtColor(color, cv2.COLOR_HSV2RGB, dst=color)
+
+label_insertion = LabelInsertion(
+        aruco_background_reference_hsv=label_color,
+        label_hsv=(28, 220, 200),
+        border_hsv=(117, 180, 240),
+        global_hsv_std=(4, 20, 20),
+        local_hsv_std=(2, 10, 10),
+    )
+
+
+show(label_insertion.transform(frame, marker_corners[0]))
+plt.show()
+
+
