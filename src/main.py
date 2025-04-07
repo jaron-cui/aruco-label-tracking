@@ -58,6 +58,7 @@ for i in range(len(vr)):
     frames.append(frame)
 
 frames = transmute_lemons_to_limes(np.stack(frames, axis=0))
+insert_labels(frames)
 # fourcc = cv2.VideoWriterProperties(*'mp4v')  # Codec for video encoding
 video = cv2.VideoWriter('../out/transmutation.mp4', -1, fps, (frames[0].shape[1], frames[0].shape[0]))
 for frame in frames:

@@ -48,8 +48,8 @@ class LabelInsertion:
 
     def transform(self, image: np.ndarray, aruco_corners: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        label_corners = scale_quadrilateral(aruco_corners, 1.34)
-        label_mask = get_label_mask(image, label_corners)
+        label_corners = scale_quadrilateral(aruco_corners, 1.35)
+        label_mask = get_label_mask(image, label_corners.copy())
         aruco_background_hsv = get_aruco_background_color(hsv, label_mask, self.aruco_background_reference_hsv)
 
         label_hsv_color = aruco_background_hsv + self.label_hsv_shift
@@ -71,7 +71,7 @@ class LabelInsertion:
 
         # map onto image
         pts1 = np.float32([[0, 0], [0, self.label_resolution[1]], self.label_resolution, [self.label_resolution[0], 0]])
-        pts2 = np.float32(label_corners)
+        pts2 = np.float32(label_corners.copy())
         H, _ = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
 
         mapped_label = cv2.warpPerspective(label_image, H, (image.shape[1], image.shape[0]))
@@ -79,11 +79,11 @@ class LabelInsertion:
         _, mask = cv2.threshold(gray_mapped_label, 1, 255, cv2.THRESH_BINARY)
         mask_inv = cv2.bitwise_not(mask)
 
-        dest_bg = cv2.bitwise_and(image, image, mask=mask_inv)
+        image[:] = cv2.bitwise_and(image, image, mask=mask_inv)
         warped_fg = cv2.bitwise_and(mapped_label, mapped_label, mask=mask)
-        final_img = cv2.add(dest_bg, warped_fg)
+        image += warped_fg
 
-        return final_img
+        return image
 
 
 def get_label_mask(image: np.ndarray, label_corners: np.ndarray) -> np.ndarray:
@@ -129,10 +129,96 @@ def seg_intersect(a1,a2, b1,b2) :
     return (num / denom.astype(float)) * db + b1
 
 
-def scale_quadrilateral(points: np.ndarray, scale_factor: float) -> np.ndarray:
-  center = seg_intersect(points[0], points[2], points[1], points[3])
-  return (points - center) * scale_factor + center
+def segment_intersection(p1, p2, q1, q2):
+    """
+    p1, p2: endpoints of the first segment
+    q1, q2: endpoints of the second segment
+    Each point is a tuple or list of (x, y)
 
+    Returns:
+        (x, y) if the segments intersect
+        None if they don't intersect within the segment bounds
+    """
+
+    def det(a, b):
+        return a[0] * b[1] - a[1] * b[0]
+
+    x_diff = (p1[0] - p2[0], q1[0] - q2[0])
+    y_diff = (p1[1] - p2[1], q1[1] - q2[1])
+
+    div = det(x_diff, y_diff)
+    if div == 0:
+        return None  # Lines are parallel
+
+    d = (det(p1, p2), det(q1, q2))
+    x = det(d, x_diff) / div
+    y = det(d, y_diff) / div
+
+    return np.array([x, y])
+
+
+def same_side_of_line(a, b, p, q):
+    """
+    Checks whether points p and q lie on the same side of the line segment a-b.
+
+    Parameters:
+        a, b, p, q: (x, y) tuples
+
+    Returns:
+        True if p and q are on the same side of line ab, False otherwise.
+    """
+
+    def cross(v1, v2):
+        return v1[0] * v2[1] - v1[1] * v2[0]
+
+    ab = (b[0] - a[0], b[1] - a[1])
+    ap = (p[0] - a[0], p[1] - a[1])
+    aq = (q[0] - a[0], q[1] - a[1])
+
+    cp1 = cross(ab, ap)
+    cp2 = cross(ab, aq)
+
+    return cp1 * cp2 >= 0
+def scale_quadrilateral(points: np.ndarray, scale_factor: float) -> np.ndarray:
+    dtype = points.dtype
+    points = points.astype(np.float32)
+    geometric_center = segment_intersection(points[0], points[2], points[1], points[3])
+    return ((points - geometric_center) * scale_factor + geometric_center).astype(dtype)
+    center = points.mean(axis=0)
+    return ((points - center) * scale_factor + center).astype(dtype)
+
+
+def scale_quad_projectively(quad: np.ndarray, scale: float) -> np.ndarray:
+    """
+    Scale a quadrilateral outward in a projective (perspective-aware) way.
+
+    quad: (4, 2) array of [top-left, top-right, bottom-right, bottom-left]
+    scale: scale factor (e.g., 1.3)
+    returns: scaled quad in image coordinates
+    """
+    # Step 1: Define canonical square
+    canonical = np.array([
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1]
+    ], dtype=np.float32)
+
+    # Step 2: Compute homography from quad to canonical
+    H = cv2.getPerspectiveTransform(quad.astype(np.float32), canonical)
+
+    # Step 3: Warp original quad to canonical square
+    quad_in_canonical = cv2.perspectiveTransform(quad[None], H)[0]
+
+    # Step 4: Scale points from canonical center (0.5, 0.5)
+    center = np.array([0.5, 0.5], dtype=np.float32)
+    scaled = (quad_in_canonical - center) * scale + center
+
+    # Step 5: Compute inverse homography to return to image space
+    H_inv = cv2.getPerspectiveTransform(canonical, quad.astype(np.float32))
+    scaled_back = cv2.perspectiveTransform(scaled[None], H_inv)[0]
+
+    return scaled_back
 import decord
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -179,8 +265,8 @@ label_insertion = LabelInsertion(
         local_hsv_std=(2, 10, 10),
     )
 
-
-# show(label_insertion.transform(frame, marker_corners[0]))
+# label_insertion.transform(frame, marker_corners[0])
+# show(frame)
 # plt.show()
 
 # label = np.zeros((100, 100, 3), dtype=np.uint8)

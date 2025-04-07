@@ -29,20 +29,23 @@ class TrackingAnnotator:
     def __init__(
         self,
         aruco_dict: aruco.Dictionary,
-        annotate_frame: typing.Callable[[np.ndarray, int, np.ndarray], np.ndarray]
+        annotate_frame: typing.Callable[[np.ndarray, int, np.ndarray], None]
     ):
         self.aruco_dict = aruco_dict
         self.annotate_frame = annotate_frame
 
-    def annotate_frames(self, frames: typing.List[np.ndarray]):
+    def annotate_frames(self, frames: np.ndarray | typing.List[np.ndarray]):
+        grays = np.zeros(frames.shape[:-1], dtype=np.uint8)
+        for frame_index in range(frames.shape[0]):
+            grays[frame_index] = cv2.cvtColor(frames[frame_index], cv2.COLOR_RGB2GRAY)
+
         detections: typing.List[typing.Tuple[np.ndarray, np.ndarray]] = []
         for frame_index, frame in enumerate(frames):
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             parameters = aruco.DetectorParameters()
             detector = aruco.ArucoDetector(aruco_dict, parameters)
 
             # Detect ArUco markers
-            marker_corners, marker_ids, _ = detector.detectMarkers(gray)
+            marker_corners, marker_ids, _ = detector.detectMarkers(grays[frame_index])
 
             if marker_ids is None:
                 marker_ids = []
@@ -54,11 +57,13 @@ class TrackingAnnotator:
             # annotate the detected markers
             for i, marker_id in enumerate(marker_ids):
                 self.annotate_frame(frame, marker_id, marker_corners[i])
-        self._annotate_gaps(frames, detections)
+        self._annotate_gaps(frames, grays, detections)
 
-    def find_detection_gaps(self, frames: typing.List[np.ndarray],
-                            detections: typing.List[typing.Tuple[np.ndarray, np.ndarray]]) -> typing.Dict[
-        int, typing.List[DetectionGap]]:
+    def find_detection_gaps(
+        self,
+        frames: typing.List[np.ndarray],
+        detections: typing.List[typing.Tuple[np.ndarray, np.ndarray]]
+    ) -> typing.Dict[int, typing.List[DetectionGap]]:
         # detection gaps for which a detected frame prior and detected frame after have been found
         detection_gaps: typing.Dict[int, typing.List[DetectionGap]] = {}
         # detection gaps preceded by a detected frame but for which detection has not yet resumed
@@ -100,13 +105,17 @@ class TrackingAnnotator:
 
         return detection_gaps
 
-    def _annotate_gaps(self, frames: typing.List[np.ndarray],
-                       detections: typing.List[typing.Tuple[np.ndarray, np.ndarray]]):
+    def _annotate_gaps(
+        self,
+        frames: typing.List[np.ndarray],
+        grays: np.ndarray,
+        detections: typing.List[typing.Tuple[np.ndarray, np.ndarray]]
+    ):
         forward_detection_gaps = self.find_detection_gaps(frames, detections)
         backward_detection_gaps = self.find_detection_gaps(list(reversed(frames)), list(reversed(detections)))
 
-        forward_interpolations = self._interpolated_marker_positions(frames, forward_detection_gaps)
-        backward_interpolations = self._interpolated_marker_positions(list(reversed(frames)), backward_detection_gaps)
+        forward_interpolations = self._interpolated_marker_positions(grays, forward_detection_gaps)
+        backward_interpolations = self._interpolated_marker_positions(np.flip(grays, axis=0), backward_detection_gaps)
 
         combined_interpolation = {}
         for marker_id in forward_interpolations:
@@ -136,26 +145,24 @@ class TrackingAnnotator:
 
     def _interpolated_marker_positions(
         self,
-        frames: typing.List[np.ndarray],
+        grays: np.ndarray,
         detection_gaps: typing.Dict[int, typing.List[DetectionGap]]
     ) -> typing.Dict[int, typing.List[np.ndarray | None]]:
-
-        gray = [cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) for frame in frames]
-        interpolated_corners = {marker_id: [None] * len(frames) for marker_id in detection_gaps}
+        interpolated_corners = {marker_id: [None] * len(grays) for marker_id in detection_gaps}
         for marker_id, marker_detection_gaps in detection_gaps.items():
             for detection_gap in marker_detection_gaps:
                 corners = detection_gap.start_corners.copy()
                 for frame_index in range(detection_gap.start_frame_index + 1, detection_gap.end_frame_index):
-                    frame = frames[frame_index]
-                    corners = cv2.calcOpticalFlowPyrLK(gray[frame_index - 1], gray[frame_index], corners, None)[0]
+                    gray = grays[frame_index]
+                    corners = cv2.calcOpticalFlowPyrLK(grays[frame_index - 1], grays[frame_index], corners, None)[0]
                     # if st.sum() != 4:
                     #   continue
                     corner_out_of_bounds = False
                     for corner_index, corner in enumerate(corners):
                         y, x = int(corner[0]), int(corner[1])
                         tolerance = 30
-                        if not (-tolerance <= y < frame.shape[1] + tolerance
-                                and -tolerance <= x < frame.shape[0] + tolerance):
+                        if not (-tolerance <= y < gray.shape[1] + tolerance
+                                and -tolerance <= x < gray.shape[0] + tolerance):
                             corner_out_of_bounds = True
                             break
                     if corner_out_of_bounds:
@@ -183,4 +190,4 @@ def label_frames(video_path: Path):
     video.release()
 
 
-label_frames(Path('../data/RGB_2025-03-05-14_58_10.mp4'))
+# label_frames(Path('../data/RGB_2025-03-05-14_58_10.mp4'))
