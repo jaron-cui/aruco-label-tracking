@@ -48,7 +48,7 @@ class LabelInsertion:
 
     def transform(self, image: np.ndarray, aruco_corners: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        label_corners = scale_quadrilateral(aruco_corners, 1.3)
+        label_corners = scale_quadrilateral(aruco_corners, 1.34)
         label_mask = get_label_mask(image, label_corners)
         aruco_background_hsv = get_aruco_background_color(hsv, label_mask, self.aruco_background_reference_hsv)
 
@@ -69,12 +69,26 @@ class LabelInsertion:
         cv2.cvtColor(label_image, cv2.COLOR_HSV2RGB, dst=label_image)
         cv2.blur(label_image, (3, 3), dst=label_image)
 
-        return label_image
+        # map onto image
+        pts1 = np.float32([[0, 0], [0, self.label_resolution[1]], self.label_resolution, [self.label_resolution[0], 0]])
+        pts2 = np.float32(label_corners)
+        H, _ = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
+
+        mapped_label = cv2.warpPerspective(label_image, H, (image.shape[1], image.shape[0]))
+        gray_mapped_label = cv2.cvtColor(mapped_label, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray_mapped_label, 1, 255, cv2.THRESH_BINARY)
+        mask_inv = cv2.bitwise_not(mask)
+
+        dest_bg = cv2.bitwise_and(image, image, mask=mask_inv)
+        warped_fg = cv2.bitwise_and(mapped_label, mapped_label, mask=mask)
+        final_img = cv2.add(dest_bg, warped_fg)
+
+        return final_img
 
 
 def get_label_mask(image: np.ndarray, label_corners: np.ndarray) -> np.ndarray:
     mask = np.zeros(image.shape[:-1], dtype=np.uint8)
-    print(label_corners, image.shape, mask.shape)
+    # print(label_corners, image.shape, mask.shape)
     return cv2.fillPoly(mask, [label_corners.astype(np.int32)], 255)
 
 
@@ -84,7 +98,7 @@ def get_aruco_background_color(
     label_only = cv2.bitwise_and(image, image, mask=label_mask)
     hsv_similarity_by_pixel = -np.abs(label_only - aruco_background_hsv).sum(axis=2)
     most_similar_pixel = np.argmax(hsv_similarity_by_pixel)
-    print(np.unravel_index(most_similar_pixel, image.shape[:-1]))
+    # print(np.unravel_index(most_similar_pixel, image.shape[:-1]))
     return image[*np.unravel_index(most_similar_pixel, image.shape[:-1])]
 
 
@@ -147,14 +161,14 @@ detector = aruco.ArucoDetector(aruco_dict, parameters)
 # Detect ArUco markers
 marker_corners, marker_ids, _ = detector.detectMarkers(gray)
 marker_corners, marker_ids = np.array(marker_corners).squeeze(1), np.array(marker_ids).squeeze(1)
-marker_corners = [scale_quadrilateral(corners, 1.3) for corners in marker_corners]
+# marker_corners = [scale_quadrilateral(corners, 1.3) for corners in marker_corners]
 # frame = video_frames_extractor(Path('../data/RGB_2025-03-05-14_58_10.mp4'))[90]
 # transform = LemonTransmutation()
 # out = transform.transform(frame, np.array([220, 480]))
 label_color = get_aruco_background_color(cv2.cvtColor(frame, cv2.COLOR_RGB2HSV), get_label_mask(frame, marker_corners[0]), np.array([65, 15, 255]))
 color = np.zeros((10, 10, 3), dtype=np.uint8)
 color[:, :] = label_color
-print(label_color)
+# print('Label color:', label_color)
 cv2.cvtColor(color, cv2.COLOR_HSV2RGB, dst=color)
 
 label_insertion = LabelInsertion(
@@ -166,7 +180,14 @@ label_insertion = LabelInsertion(
     )
 
 
-show(label_insertion.transform(frame, marker_corners[0]))
-plt.show()
+# show(label_insertion.transform(frame, marker_corners[0]))
+# plt.show()
 
-
+# label = np.zeros((100, 100, 3), dtype=np.uint8)
+# label[:, :] = np.array([255, 0, 0])
+# label[12:-12, 12:-12] = np.array([0, 255, 255])
+# cv2.imwrite('../out/lemon-label.png', label)
+# label[12:-12, 12:-12] = np.array([50, 205, 50])
+# cv2.imwrite('../out/lime-label.png', label)
+# label[12:-12, 12:-12] = np.array([0, 165, 255])
+# cv2.imwrite('../out/orange-label.png', label)
