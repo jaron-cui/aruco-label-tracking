@@ -8,7 +8,7 @@ class LemonTransmutation:
   def __init__(
       self,
       source_hue: int = 28,
-      target_hue: int = 46,
+      target_hue: int = 42,
       hue_range_scaling: float = 0.7,
       min_selected_hue: int = 14,
       max_selected_hue: int = 37
@@ -28,6 +28,7 @@ class LemonTransmutation:
     :param inplace: apply the transformation in-place
     :return: the image with the lemon recolored
     """
+    # TODO: this operation doesn't work in-place. Fix it!
     if not inplace:
       image = image.copy()
     lemon_pixel = lemon_pixel.astype(np.uint64)
@@ -65,7 +66,7 @@ class LemonTransmutation:
     value_channel = hsv[:, :, 2]
 
     min_saturation = 60
-    min_value = np.minimum(255 - saturation_channel, 240)
+    min_value = np.minimum(255 - saturation_channel, 255)
 
     hue_match_mask = (self.min_selected_hue <= hue_channel) & (hue_channel <= self.max_selected_hue)
     saturation_match_mask = saturation_channel >= min_saturation
@@ -76,14 +77,32 @@ class LemonTransmutation:
     return yellow_mask
 
   def _shift_hue(self, hsv: np.ndarray):
-    value_scaling = 0.8
+    value_scaling = 0.75
 
-    hsv[:, :, 0] = (hsv[:, :, 0] - self.source_hue) * self.hue_range_scaling + self.target_hue
-    # hue_shifted[:, :, 1] *= 1.4
-    hsv[:, :, 2] = hsv[:, :, 2] * value_scaling
+    hsv = hsv.astype(np.float32)
+    diff = signed_angle_difference(hsv[:, :, 0] * 2, self.source_hue * 2)
+    hsv[:, :, 0] = diff * self.hue_range_scaling / 2 + self.target_hue
+    hsv[:, :, 1] = hsv[:, :, 1] * 0.8
+    hsv[:, :, 2] = (hsv[:, :, 2] + 20) * value_scaling - 30
 
     return np.clip(hsv, 0, 255).astype(np.uint8)
 
+
+def normalize_angle_degrees(angle_degrees: np.ndarray):
+  mod = np.mod(angle_degrees, 360)
+  mod[mod < 0] = mod[mod < 0] + 360
+  return mod
+
+
+def angle_difference(angle1: np.ndarray, angle2: np.ndarray) -> np.ndarray:
+  raw_diff = normalize_angle_degrees(angle2 - angle1)
+  return np.minimum(raw_diff, 360 - raw_diff)
+
+
+def signed_angle_difference(angle1: np.ndarray, angle2: np.ndarray) -> np.ndarray:
+  diff = angle_difference(angle1, angle2)
+  diff[diff > 180] -= 360
+  return diff
 # import decord
 # import matplotlib.pyplot as plt
 # from pathlib import Path
