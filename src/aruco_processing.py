@@ -26,7 +26,11 @@ def annotate_frame(frame: np.ndarray, markerId: int, corners: np.ndarray):
 
 
 class TrackingAnnotator:
-    def __init__(self, aruco_dict: aruco.Dictionary, annotate_frame):
+    def __init__(
+        self,
+        aruco_dict: aruco.Dictionary,
+        annotate_frame: typing.Callable[[np.ndarray, int, np.ndarray], np.ndarray]
+    ):
         self.aruco_dict = aruco_dict
         self.annotate_frame = annotate_frame
 
@@ -49,7 +53,7 @@ class TrackingAnnotator:
 
             # annotate the detected markers
             for i, marker_id in enumerate(marker_ids):
-                annotate_frame(frame, marker_id, marker_corners[i])
+                self.annotate_frame(frame, marker_id, marker_corners[i])
         self._annotate_gaps(frames, detections)
 
     def find_detection_gaps(self, frames: typing.List[np.ndarray],
@@ -128,7 +132,7 @@ class TrackingAnnotator:
                     if marker_id == 1:
                         missed += 1
                     continue
-                annotate_frame(frames[frame_index], marker_id, corners)
+                self.annotate_frame(frames[frame_index], marker_id, corners)
 
     def _interpolated_marker_positions(
         self,
@@ -143,7 +147,7 @@ class TrackingAnnotator:
                 corners = detection_gap.start_corners.copy()
                 for frame_index in range(detection_gap.start_frame_index + 1, detection_gap.end_frame_index):
                     frame = frames[frame_index]
-                    corners, st, err = cv2.calcOpticalFlowPyrLK(gray[frame_index - 1], gray[frame_index], corners, None)
+                    corners = cv2.calcOpticalFlowPyrLK(gray[frame_index - 1], gray[frame_index], corners, None)[0]
                     # if st.sum() != 4:
                     #   continue
                     corner_out_of_bounds = False
